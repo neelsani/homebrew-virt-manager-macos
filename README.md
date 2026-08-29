@@ -36,8 +36,9 @@ via `patch :DATA`) makes spice-gtk, on macOS (GDK_WINDOWING_QUARTZ):
 
 ## Install
 
-    brew tap neelsani/virt-manager-macos /path/to/this/repo
-    brew uninstall spice-gtk virt-viewer   # remove previous installs
+    brew tap neelsani/virt-manager-macos https://github.com/neelsani/homebrew-virt-manager-macos
+    brew trust neelsani/virt-manager-macos   # Homebrew 6 requires trusting taps
+    brew uninstall spice-gtk virt-viewer    # remove previous installs
     brew install neelsani/virt-manager-macos/virt-viewer
 
 The tap's `virt-viewer` depends on the tap's patched `spice-gtk`, so it is
