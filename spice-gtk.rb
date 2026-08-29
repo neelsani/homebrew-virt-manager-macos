@@ -127,7 +127,9 @@ index b6cc95b..d05e945 100755
 +#!/usr/bin/env python3
  # -*- python -*-
  #
- # Keycode Map Generatordiff --git a/src/spice-gtk-session.c b/src/spice-gtk-session.c
+ # Keycode Map Generator
+
+diff --git a/src/spice-gtk-session.c b/src/spice-gtk-session.c
 index 72b0168..f577b73 100644
 --- a/src/spice-gtk-session.c
 +++ b/src/spice-gtk-session.c
