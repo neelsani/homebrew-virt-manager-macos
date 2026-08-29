@@ -15,10 +15,10 @@ class VirtViewer < Formula
   depends_on "gtk+3"
   depends_on "gtk-vnc"
   depends_on "libvirt-glib"
-  depends_on "shared-mime-info"
   # Use the patched spice-gtk from this tap so remote-viewer does not crash
   # on Ctrl+C / Ctrl+V (macOS clipboard / GDK Quartz select-thread race).
   depends_on "neelsani/virt-manager-macos/spice-gtk"
+  depends_on "shared-mime-info"
 
   patch :DATA
 
@@ -28,9 +28,9 @@ class VirtViewer < Formula
   end
 
   def post_install
-    system Formula["shared-mime-info"].opt_bin/"update-mime-database", HOMEBREW_PREFIX/"share/mime"
-    system Formula["gtk+3"].opt_bin/"gtk3-update-icon-cache", HOMEBREW_PREFIX/"share/icons/hicolor"
-    system Formula["desktop-file-utils"].opt_bin/"update-desktop-database", HOMEBREW_PREFIX/"share/applications"
+    system formula_opt_bin("shared-mime-info")/"update-mime-database", HOMEBREW_PREFIX/"share/mime"
+    system formula_opt_bin("gtk+3")/"gtk3-update-icon-cache", HOMEBREW_PREFIX/"share/icons/hicolor"
+    system formula_opt_bin("desktop-file-utils")/"update-desktop-database", HOMEBREW_PREFIX/"share/applications"
   end
 
   test do
