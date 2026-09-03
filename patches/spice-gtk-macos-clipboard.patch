@@ -9,7 +9,7 @@ index b6cc95b..d05e945 100755
  #
  # Keycode Map Generator
 diff --git a/src/spice-gtk-session.c b/src/spice-gtk-session.c
-index 72b0168..4eb24ed 100644
+index 72b0168..0835380 100644
 --- a/src/spice-gtk-session.c
 +++ b/src/spice-gtk-session.c
 @@ -19,6 +19,19 @@
@@ -81,7 +81,27 @@ index 72b0168..4eb24ed 100644
          g_clear_pointer(&s->atoms[i], g_free);
          s->n_atoms[i] = 0;
      }
-@@ -858,6 +892,19 @@ static void clipboard_get(GtkClipboard *clipboard,
+@@ -350,9 +384,17 @@ static void spice_gtk_session_set_property(GObject      *gobject,
+     case PROP_SESSION:
+         s->session = g_value_get_object(value);
+         break;
+-    case PROP_AUTO_CLIPBOARD:
+-        s->auto_clipboard_enable = g_value_get_boolean(value);
++    case PROP_AUTO_CLIPBOARD: {
++        gboolean disable_clipboard;
++
++        g_object_get(s->session, "disable-clipboard", &disable_clipboard, NULL);
++        if (disable_clipboard && g_value_get_boolean(value)) {
++            g_debug("not enabling clipboard sharing as it was disabled on the command-line");
++        } else {
++            s->auto_clipboard_enable = g_value_get_boolean(value);
++        }
+         break;
++    }
+     case PROP_AUTO_USBREDIR: {
+         SpiceDesktopIntegration *desktop_int;
+         gboolean orig_value = s->auto_usbredir_enable;
+@@ -858,6 +900,19 @@ static void clipboard_get(GtkClipboard *clipboard,
      g_return_if_fail(info < SPICE_N_ELEMENTS(atom2agent));
      g_return_if_fail(s->main != NULL);
  
@@ -101,7 +121,7 @@ index 72b0168..4eb24ed 100644
      if (s->clipboard_release_delay[selection]) {
          SPICE_DEBUG("not requesting data from guest during delayed release");
          return;
-@@ -909,6 +956,152 @@ static void clipboard_clear(GtkClipboard *clipboard, gpointer user_data)
+@@ -909,6 +964,152 @@ static void clipboard_clear(GtkClipboard *clipboard, gpointer user_data)
         don't need to do anything here */
  }
  
@@ -254,7 +274,7 @@ index 72b0168..4eb24ed 100644
  static gboolean clipboard_grab(SpiceMainChannel *main, guint selection,
                                 guint32* types, guint32 ntypes,
                                 gpointer user_data)
-@@ -959,6 +1152,29 @@ static gboolean clipboard_grab(SpiceMainChannel *main, guint selection,
+@@ -959,6 +1160,29 @@ static gboolean clipboard_grab(SpiceMainChannel *main, guint selection,
          return TRUE;
      }
  
@@ -284,3 +304,135 @@ index 72b0168..4eb24ed 100644
      if (!gtk_clipboard_set_with_owner(cb,
                                        targets,
                                        num_targets,
+diff --git a/src/spice-option.c b/src/spice-option.c
+index a1eacc3..6717866 100644
+--- a/src/spice-option.c
++++ b/src/spice-option.c
+@@ -20,6 +20,7 @@
+ #include <glib-object.h>
+ #include <glib/gi18n-lib.h>
+ #include "spice-session.h"
++#include "spice-session-priv.h"
+ #include "spice-util.h"
+ #include "spice-channel-priv.h"
+ #include "usb-device-manager.h"
+@@ -34,6 +35,7 @@ static char *usbredir_redirect_on_connect = NULL;
+ static gboolean smartcard = FALSE;
+ static gboolean disable_audio = FALSE;
+ static gboolean disable_usbredir = FALSE;
++static gboolean disable_clipboard = FALSE;
+ static gint cache_size = 0;
+ static gint glz_window_size = 0;
+ static gchar *secure_channels = NULL;
+@@ -179,6 +181,8 @@ GOptionGroup* spice_get_option_group(void)
+           N_("Path to the local certificate database to use for software smartcard certificates"), N_("<certificate-db>") },
+         { "spice-disable-usbredir", '\0', 0, G_OPTION_ARG_NONE, &disable_usbredir,
+           N_("Disable USB redirection support"), NULL },
++        { "spice-disable-clipboard", '\0', 0, G_OPTION_ARG_NONE, &disable_clipboard,
++          N_("Disable client/guest clipboard sharing"), NULL },
+         { "spice-usbredir-auto-redirect-filter", '\0', 0, G_OPTION_ARG_STRING, &usbredir_auto_redirect_filter,
+           N_("Filter selecting USB devices to be auto-redirected when plugged in"), N_("<filter-string>") },
+         { "spice-usbredir-redirect-on-connect", '\0', 0, G_OPTION_ARG_STRING, &usbredir_redirect_on_connect,
+@@ -319,6 +323,8 @@ void spice_set_session_option(SpiceSession *session)
+         g_object_set(session, "enable-usbredir", FALSE, NULL);
+     if (disable_audio)
+         g_object_set(session, "enable-audio", FALSE, NULL);
++    if (disable_clipboard)
++        spice_session_set_disable_clipboard(session, TRUE);
+     if (cache_size)
+         g_object_set(session, "cache-size", cache_size, NULL);
+     if (glz_window_size)
+diff --git a/src/spice-session-priv.h b/src/spice-session-priv.h
+index b4919a4..11fb6b4 100644
+--- a/src/spice-session-priv.h
++++ b/src/spice-session-priv.h
+@@ -56,6 +56,7 @@ void spice_session_abort_migration(SpiceSession *session);
+ void spice_session_set_migration_state(SpiceSession *session, SpiceSessionMigration state);
+ 
+ void spice_session_set_port(SpiceSession *session, int port, gboolean tls);
++void spice_session_set_disable_clipboard(SpiceSession *session, gboolean disabled);
+ void spice_session_get_pubkey(SpiceSession *session, guint8 **pubkey, guint *size);
+ guint spice_session_get_verify(SpiceSession *session);
+ const gchar* spice_session_get_username(SpiceSession *session);
+diff --git a/src/spice-session.c b/src/spice-session.c
+index bb3c6cd..76031e1 100644
+--- a/src/spice-session.c
++++ b/src/spice-session.c
+@@ -89,6 +89,9 @@ struct _SpiceSessionPrivate {
+     /* whether to enable USB redirection */
+     gboolean          usbredir;
+ 
++    /* whether clipboard sharing was disabled through the command line */
++    gboolean          disable_clipboard;
++
+     /* Set when a usbredir channel has requested the keyboard grab to be
+        temporarily released (because it is going to invoke policykit) */
+     gboolean          inhibit_keyboard_grab;
+@@ -185,6 +188,7 @@ enum {
+     PROP_SMARTCARD_CERTIFICATES,
+     PROP_SMARTCARD_DB,
+     PROP_USBREDIR,
++    PROP_DISABLE_CLIPBOARD,
+     PROP_INHIBIT_KEYBOARD_GRAB,
+     PROP_DISABLE_EFFECTS,
+     PROP_COLOR_DEPTH,
+@@ -669,6 +673,9 @@ static void spice_session_get_property(GObject    *gobject,
+     case PROP_USBREDIR:
+         g_value_set_boolean(value, s->usbredir);
+         break;
++    case PROP_DISABLE_CLIPBOARD:
++        g_value_set_boolean(value, s->disable_clipboard);
++        break;
+     case PROP_INHIBIT_KEYBOARD_GRAB:
+         g_value_set_boolean(value, s->inhibit_keyboard_grab);
+         break;
+@@ -813,6 +820,9 @@ static void spice_session_set_property(GObject      *gobject,
+     case PROP_USBREDIR:
+         s->usbredir = g_value_get_boolean(value);
+         break;
++    case PROP_DISABLE_CLIPBOARD:
++        s->disable_clipboard = g_value_get_boolean(value);
++        break;
+     case PROP_INHIBIT_KEYBOARD_GRAB:
+         s->inhibit_keyboard_grab = g_value_get_boolean(value);
+         break;
+@@ -1234,6 +1244,24 @@ static void spice_session_class_init(SpiceSessionClass *klass)
+                           G_PARAM_READWRITE | G_PARAM_CONSTRUCT |
+                           G_PARAM_STATIC_STRINGS));
+ 
++    /**
++     * SpiceSession:disable-clipboard:
++     *
++     * Whether clipboard sharing was disabled on the command line. This
++     * property is read-only, and set through a method so that applications
++     * using the library cannot override what the user set on the command
++     * line.
++     *
++     * Since: 0.35
++     **/
++    g_object_class_install_property
++        (gobject_class, PROP_DISABLE_CLIPBOARD,
++         g_param_spec_boolean("disable-clipboard",
++                          "Disable clipboard sharing",
++                          "Clipboard sharing was disabled on the command line",
++                          FALSE,
++                          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
++
+     /**
+      * SpiceSession::inhibit-keyboard-grab:
+      *
+@@ -2834,6 +2862,14 @@ gboolean spice_session_get_smartcard_enabled(SpiceSession *session)
+     return session->priv->smartcard;
+ }
+ 
++G_GNUC_INTERNAL
++void spice_session_set_disable_clipboard(SpiceSession *session, gboolean disabled)
++{
++    g_return_if_fail(SPICE_IS_SESSION(session));
++
++    session->priv->disable_clipboard = !!disabled;
++}
++
+ G_GNUC_INTERNAL
+ PhodavServer* spice_session_get_webdav_server(SpiceSession *session)
+ {
