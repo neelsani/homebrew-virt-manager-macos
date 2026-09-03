@@ -27,12 +27,17 @@ https://github.com/jeffreywildman/homebrew-virt-manager/issues/206
 ## Fix
 
 `patches/spice-gtk-macos-clipboard.patch` (also inlined in `spice-gtk.rb`
-via `patch :DATA`) makes spice-gtk, on macOS (GDK_WINDOWING_QUARTZ):
+via `patch :DATA`) makes spice-gtk work on macOS (GDK_WINDOWING_QUARTZ):
 
-* fetch the guest's clipboard text eagerly when it grabs the clipboard and
-  publish it with `gtk_clipboard_set_text()`, which never re-enters the
-  main loop, so guest->host copy/paste works without crashing; and
-* refuse to run the nested loop in `clipboard_get()`.
+* **guest->host** — when the guest grabs the clipboard, fetch its text eagerly
+  and publish it with `gtk_clipboard_set_text()`, which never re-enters the
+  main loop (the nested-loop `clipboard_get()` corrupted GDK Quartz's
+  select-thread poll state and aborted the process); and refuse to run the
+  nested loop in `clipboard_get()`.
+* **host->guest** — GTK never emits `GtkClipboard::owner-change` on macOS
+  (gnome/gtk#1757), so spice-gtk never noticed host clipboard changes. A
+  ~300ms pasteboard poll detects external changes and grabs the host clipboard
+  to the guest agent, so copying on the Mac and pasting in the guest works too.
 
 ## Install
 
