@@ -49,6 +49,22 @@ via `patch :DATA`) makes spice-gtk work on macOS (GDK_WINDOWING_QUARTZ):
 The tap's `virt-viewer` depends on the tap's patched `spice-gtk`, so it is
 always used, and the formula builds from source (no bottle).
 
+## Disabling clipboard sharing (privacy)
+
+To stop the Mac clipboard from ever being shared with the guest (e.g. so a
+password copied on the Mac can't leak into the VM), pass `--spice-disable-clipboard`.
+It is a real spice-gtk option added in this tap (not in upstream 0.42), and it
+forces `auto-clipboard` off in both directions.
+
+```sh
+# direct
+remote-viewer --spice-disable-clipboard vv://...
+
+# incus VGA console
+incus default set console_spice_command="remote-viewer --spice-disable-clipboard SOCKET"
+# re-enable: incus default unset console_spice_command
+```
+
 ## Verify
 
     remote-viewer vv://...  # then Ctrl+C / Ctrl+V inside the guest
