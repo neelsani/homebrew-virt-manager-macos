@@ -6,7 +6,7 @@ class SpiceGtk < Formula
   url "https://www.spice-space.org/download/gtk/spice-gtk-0.42.tar.xz"
   sha256 "9380117f1811ad1faa1812cb6602479b6290d4a0d8cc442d44427f7f6c0e7a58"
   license all_of: ["GPL-2.0-or-later", "LGPL-2.1-or-later", "BSD-3-Clause"]
-  revision 5
+  revision 6
 
   livecheck do
     url "https://www.spice-space.org/download/gtk/"
@@ -129,10 +129,10 @@ index b6cc95b..d05e945 100755
  #
  # Keycode Map Generator
 diff --git a/src/spice-gtk-session.c b/src/spice-gtk-session.c
-index 72b0168..4bc919e 100644
+index 72b0168..4eb24ed 100644
 --- a/src/spice-gtk-session.c
 +++ b/src/spice-gtk-session.c
-@@ -19,6 +19,10 @@
+@@ -19,6 +19,19 @@
  #include <glib.h>
  #include <gdk/gdk.h>
  
@@ -140,18 +140,59 @@ index 72b0168..4bc919e 100644
 +#include <gdk/gdkquartz.h>
 +#endif
 +
++#ifdef GDK_WINDOWING_QUARTZ
++/* Interval (ms) for polling the host pasteboard for host->guest sync.
++ * macOS GTK never emits GtkClipboard::owner-change (gtk#1757), so we detect
++ * host clipboard changes ourselves instead.
++ */
++#define MACOS_CLIPBOARD_POLL_INTERVAL_MS 300
++static gboolean macos_clipboard_poll(gpointer user_data);
++#endif
++
  #ifdef HAVE_X11_XKBLIB_H
  #include <X11/XKBlib.h>
  #endif
-@@ -65,6 +69,7 @@ struct _SpiceGtkSessionPrivate {
+@@ -65,6 +78,9 @@ struct _SpiceGtkSessionPrivate {
      gboolean                clip_grabbed[CLIPBOARD_LAST];
      gboolean                clipboard_by_guest[CLIPBOARD_LAST];
      guint                   clipboard_release_delay[CLIPBOARD_LAST];
 +    guint                   clipboard_macos_handler[CLIPBOARD_LAST];
++    gchar                   *macos_last_host_text[CLIPBOARD_LAST];
++    guint                   macos_clipboard_poll_source;
      /* TODO: maybe add a way of restoring this? */
      GHashTable              *cb_shared_files;
      /* auto-usbredir related */
-@@ -299,6 +304,8 @@ static void spice_gtk_session_finalize(GObject *gobject)
+@@ -209,6 +225,11 @@ static void spice_gtk_session_init(SpiceGtkSession *self)
+     s->clipboard_primary = gtk_clipboard_get(GDK_SELECTION_PRIMARY);
+     g_signal_connect(G_OBJECT(s->clipboard_primary), "owner-change",
+                      G_CALLBACK(clipboard_owner_change), self);
++#ifdef GDK_WINDOWING_QUARTZ
++    s->macos_clipboard_poll_source =
++        g_timeout_add_full(G_PRIORITY_DEFAULT, MACOS_CLIPBOARD_POLL_INTERVAL_MS,
++                           macos_clipboard_poll, self, NULL);
++#endif
+     spice_g_signal_connect_object(keymap, "state-changed",
+                                   G_CALLBACK(keymap_modifiers_changed), self, 0);
+ }
+@@ -266,6 +287,17 @@ static void spice_gtk_session_dispose(GObject *gobject)
+     }
+     g_clear_pointer(&s->cb_shared_files, g_hash_table_destroy);
+ 
++#ifdef GDK_WINDOWING_QUARTZ
++    if (s->macos_clipboard_poll_source != 0) {
++        g_source_remove(s->macos_clipboard_poll_source);
++        s->macos_clipboard_poll_source = 0;
++    }
++    for (int i = 0; i < CLIPBOARD_LAST; ++i) {
++        g_free(s->macos_last_host_text[i]);
++        s->macos_last_host_text[i] = NULL;
++    }
++#endif
++
+     /* Chain up to the parent class */
+     if (G_OBJECT_CLASS(spice_gtk_session_parent_class)->dispose)
+         G_OBJECT_CLASS(spice_gtk_session_parent_class)->dispose(gobject);
+@@ -299,6 +331,8 @@ static void spice_gtk_session_finalize(GObject *gobject)
      for (i = 0; i < CLIPBOARD_LAST; ++i) {
          g_clear_pointer(&s->clip_targets[i], g_free);
          clipboard_release_delay_remove(self, i, true);
@@ -160,7 +201,7 @@ index 72b0168..4bc919e 100644
          g_clear_pointer(&s->atoms[i], g_free);
          s->n_atoms[i] = 0;
      }
-@@ -858,6 +865,19 @@ static void clipboard_get(GtkClipboard *clipboard,
+@@ -858,6 +892,19 @@ static void clipboard_get(GtkClipboard *clipboard,
      g_return_if_fail(info < SPICE_N_ELEMENTS(atom2agent));
      g_return_if_fail(s->main != NULL);
  
@@ -180,7 +221,7 @@ index 72b0168..4bc919e 100644
      if (s->clipboard_release_delay[selection]) {
          SPICE_DEBUG("not requesting data from guest during delayed release");
          return;
-@@ -909,6 +929,74 @@ static void clipboard_clear(GtkClipboard *clipboard, gpointer user_data)
+@@ -909,6 +956,152 @@ static void clipboard_clear(GtkClipboard *clipboard, gpointer user_data)
         don't need to do anything here */
  }
  
@@ -226,8 +267,86 @@ index 72b0168..4bc919e 100644
 +        SPICE_DEBUG("clipboard: macOS publishing %zu bytes to host clipboard",
 +                    strlen(text));
 +        gtk_clipboard_set_text(cb, text, -1);
++
++        /* Remember what we published so the host->guest poll below can tell
++         * our own writes apart from real external clipboard changes. */
++        g_free(s->macos_last_host_text[selection]);
++        s->macos_last_host_text[selection] = g_strdup(text);
 +    }
 +    g_free(text);
++}
++
++/* Host->guest clipboard on macOS.
++ *
++ * spice-gtk normally learns about host clipboard changes from
++ * GtkClipboard::owner-change, but GTK never emits that event on Quartz
++ * (gnome/gtk#1757). Without it spice-gtk never grabs the host clipboard to the
++ * guest agent, so copying on the Mac and pasting in the guest does nothing.
++ *
++ * We work around it by polling: every MACOS_CLIPBOARD_POLL_INTERVAL_MS we
++ * asynchronously read the host pasteboard text and, when it differs from what
++ * we last published/saw, drive the same code path as owner-change(NEW_OWNER)
++ * to grab the host clipboard to the guest.
++ */
++static void macos_clipboard_compare_cb(GtkClipboard *clipboard,
++                                       const gchar *text,
++                                       gpointer user_data)
++{
++    SpiceGtkSession *self = free_weak_ref(user_data);
++    SpiceGtkSessionPrivate *s;
++    const gchar *last;
++    int selection;
++
++    if (self == NULL)
++        return;
++
++    s = self->priv;
++    selection = get_selection_from_clipboard(s, clipboard);
++    if (selection == -1)
++        return;
++
++    if (s->main == NULL || text == NULL)
++        return;
++
++    last = s->macos_last_host_text[selection];
++    if (last != NULL && strcmp(last, text) == 0)
++        return; /* no external change */
++
++    g_free(s->macos_last_host_text[selection]);
++    s->macos_last_host_text[selection] = g_strdup(text);
++
++    SPICE_DEBUG("clipboard: macOS host clipboard changed, grabbing to guest");
++
++    s->clipboard_by_guest[selection] = FALSE;
++    s->clip_hasdata[selection] = TRUE;
++
++    if (s->auto_clipboard_enable && !read_only(self)) {
++        /* clipboard_get_targets() maps the host targets and sends a grab to
++         * the agent, which makes the guest pick up the new host contents. */
++        gtk_clipboard_request_targets(clipboard, clipboard_get_targets,
++                                      get_weak_ref(self));
++    }
++}
++
++static gboolean macos_clipboard_poll(gpointer user_data)
++{
++    SpiceGtkSession *self = user_data;
++    SpiceGtkSessionPrivate *s = self->priv;
++    GtkClipboard *cb;
++
++    if (s->main == NULL || gdk_display_get_default() == NULL)
++        return G_SOURCE_CONTINUE;
++
++    if (!s->auto_clipboard_enable || read_only(self))
++        return G_SOURCE_CONTINUE;
++
++    cb = get_clipboard_from_selection(s, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD);
++    if (cb == NULL)
++        return G_SOURCE_CONTINUE;
++
++    gtk_clipboard_request_text(cb, macos_clipboard_compare_cb, get_weak_ref(self));
++
++    return G_SOURCE_CONTINUE;
 +}
 +
 +static void clipboard_macos_got_from_guest(SpiceMainChannel *main, guint selection,
@@ -255,7 +374,7 @@ index 72b0168..4bc919e 100644
  static gboolean clipboard_grab(SpiceMainChannel *main, guint selection,
                                 guint32* types, guint32 ntypes,
                                 gpointer user_data)
-@@ -959,6 +1047,29 @@ static gboolean clipboard_grab(SpiceMainChannel *main, guint selection,
+@@ -959,6 +1152,29 @@ static gboolean clipboard_grab(SpiceMainChannel *main, guint selection,
          return TRUE;
      }
  
