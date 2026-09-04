@@ -3,7 +3,7 @@ class VirtViewer < Formula
   homepage "https://virt-manager.org/"
   url "https://releases.pagure.org/virt-viewer/virt-viewer-11.0.tar.xz"
   sha256 "a43fa2325c4c1c77a5c8c98065ac30ef0511a21ac98e590f22340869bad9abd0"
-  revision 1
+  revision 2
 
   depends_on "gettext" => :build
   depends_on "meson" => :build
@@ -101,3 +101,16 @@ index d718491..4325108 100644
      type: 'xml',
      input: metainfo + '.in',
      output: metainfo,
+diff --git a/src/virt-viewer-app.c b/src/virt-viewer-app.c
+index f832664..9cabd49 100644
+--- a/src/virt-viewer-app.c
++++ b/src/virt-viewer-app.c
+@@ -3596,7 +3596,7 @@ gboolean virt_viewer_app_get_config_share_clipboard(VirtViewerApp *self)
+                                              "virt-viewer", "share-clipboard", &error);
+ 
+     if (error) {
+-        share_clipboard = TRUE; /* backwards-compatible default value */
++        share_clipboard = FALSE; /* macOS tap default: keep clipboard sharing off unless enabled */
+         g_clear_error(&error);
+     }
+ 
